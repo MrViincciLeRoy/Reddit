@@ -37,8 +37,7 @@ def scrape_posts(subreddit, limit):
     return posts
 
 
-def generate_tts(text, output_path):
-    pipeline = KPipeline(lang_code="a")
+def generate_tts(pipeline, text, output_path):
     generator = pipeline(text, voice=VOICE, speed=1.0, split_pattern=r"\n+")
     chunks = []
     for _, _, audio in generator:
@@ -90,7 +89,8 @@ def make_video(title, audio_path, background_path, output_path):
             f"font=Arial"
         )
 
-    vf = "crop=1080:1920:(iw-1080)/2:(ih-1920)/2," + ",".join(drawtext_parts)
+    # Scale landscape (1920x1080) up so height=1920, then crop center 1080px wide for 9:16
+    vf = "scale=-2:1920,crop=1080:1920," + ",".join(drawtext_parts)
 
     cmd = [
         "ffmpeg",
@@ -137,6 +137,8 @@ def main():
 
     posts = scrape_posts(subreddit, limit)
 
+    pipeline = KPipeline(lang_code="a")
+
     for i, post in enumerate(posts):
         print(f"\n--- Post {i+1}/{len(posts)} ---")
         print(f"Title: {post['title']}")
@@ -150,7 +152,7 @@ def main():
         bg_path = pick_background(i)
 
         try:
-            generate_tts(text, audio_path)
+            generate_tts(pipeline, text, audio_path)
             make_video(post["title"], audio_path, bg_path, output_path)
         except Exception as e:
             print(f"Failed on post {i+1}: {e}")
