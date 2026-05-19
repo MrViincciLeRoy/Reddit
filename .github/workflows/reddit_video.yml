@@ -16,6 +16,9 @@ on:
         required: true
         default: 'minecraft'
 
+permissions:
+  contents: write   # needed to push data/seen_posts.json back to the repo
+
 jobs:
   generate:
     runs-on: ubuntu-latest
@@ -24,6 +27,9 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          # Use a token with write access so the push step works
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install system deps
         run: |
@@ -72,6 +78,25 @@ jobs:
           SUBREDDIT: ${{ github.event.inputs.subreddit }}
           LIMIT:     ${{ github.event.inputs.limit }}
         run: python3 make_video.py
+
+      # Runs even if the generate step partially failed, so we never lose
+      # tracking data for posts that were attempted.
+      - name: Commit tracking file
+        if: always()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Only commit if the file actually changed
+          if git diff --quiet data/seen_posts.json 2>/dev/null && \
+             git ls-files --error-unmatch data/seen_posts.json 2>/dev/null; then
+            echo "No changes to tracking file ? skipping commit"
+          else
+            git add data/seen_posts.json
+            git commit -m "chore: update seen_posts tracking [r/${{ github.event.inputs.subreddit }}, run #${{ github.run_number }}]"
+            git push
+            echo "Tracking file committed and pushed"
+          fi
 
       - name: Upload videos
         uses: actions/upload-artifact@v4

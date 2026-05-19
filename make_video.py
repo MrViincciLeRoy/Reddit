@@ -1,9 +1,11 @@
 import os
 import re
 import glob
+import json
 import random
 import subprocess
 import tempfile
+import datetime
 import requests
 import soundfile as sf
 from kokoro import KPipeline
@@ -18,12 +20,13 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-VOICE      = "af_heart"
-OUT_DIR    = "results"
-FONT_SIZE  = 52
-MAX_WIDTH  = 900
-VIDEO_W    = 1080
-VIDEO_H    = 1920
+VOICE         = "af_heart"
+OUT_DIR       = "results"
+TRACKING_FILE = "data/seen_posts.json"
+FONT_SIZE     = 52
+MAX_WIDTH     = 900
+VIDEO_W       = 1080
+VIDEO_H       = 1920
 
 SUBREDDIT_NAMES = {
     "amitheasshole":       "Am I the Asshole",
@@ -34,7 +37,7 @@ SUBREDDIT_NAMES = {
     "prorevenge":          "Pro Revenge",
     "entitledparents":     "Entitled Parents",
     "confessions":         "Confessions",
-    "AITA":      "Am I the A-hole",
+    "AITA":                "Am I the A-hole",
     "offmychest":          "Off My Chest",
 }
 
@@ -61,6 +64,37 @@ PROFANITY_MAP = {
 }
 
 
+# ?? Tracking helpers ??????????????????????????????????????????????????????????
+
+def load_tracking():
+    """Return the full tracking dict, creating it if missing."""
+    os.makedirs("data", exist_ok=True)
+    if os.path.exists(TRACKING_FILE):
+        with open(TRACKING_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"seen_posts": {}}
+
+
+def save_tracking(tracking: dict):
+    """Persist the tracking dict to disk."""
+    os.makedirs("data", exist_ok=True)
+    with open(TRACKING_FILE, "w", encoding="utf-8") as f:
+        json.dump(tracking, f, indent=2, ensure_ascii=False)
+    print(f"Tracking saved ? {TRACKING_FILE} ({len(tracking['seen_posts'])} total posts)")
+
+
+def mark_seen(tracking: dict, post: dict, subreddit: str, success: bool):
+    """Record a post in the tracking dict (called after every attempt)."""
+    tracking["seen_posts"][post["id"]] = {
+        "title":        post["title"],
+        "subreddit":    subreddit,
+        "processed_at": datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "success":      success,
+    }
+
+
+# ?? Reddit helpers ????????????????????????????????????????????????????????????
+
 def censor(text):
     for pattern, replacement in PROFANITY_MAP.items():
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
@@ -71,20 +105,36 @@ def full_subreddit_name(sub):
     return SUBREDDIT_NAMES.get(sub.lower(), sub)
 
 
-def scrape_posts(subreddit, limit):
-    url = f"https://www.reddit.com/r/{subreddit}/top.json?limit={limit}&t=day"
+def scrape_posts(subreddit, limit, seen_ids: set):
+    """
+    Fetch up to `limit` unseen top posts from today.
+    We over-fetch (limit * 3, capped at 100) so we have room to skip seen ones.
+    """
+    fetch_n = min(limit * 3, 100)
+    url = f"https://www.reddit.com/r/{subreddit}/top.json?limit={fetch_n}&t=day"
     r = requests.get(url, headers=HEADERS, proxies=PROXIES, timeout=30)
     r.raise_for_status()
-    posts = []
+
+    posts, skipped = [], 0
     for item in r.json()["data"]["children"]:
         d = item["data"]
+        post_id = d["id"]
+        if post_id in seen_ids:
+            skipped += 1
+            continue
         posts.append({
+            "id":    post_id,
             "title": d["title"],
             "body":  d.get("selftext", "")[:800],
         })
-    print(f"Fetched {len(posts)} posts from r/{subreddit}")
+        if len(posts) == limit:
+            break
+
+    print(f"Fetched {len(posts)} new posts from r/{subreddit} (skipped {skipped} already-seen)")
     return posts
 
+
+# ?? Text / font helpers ???????????????????????????????????????????????????????
 
 def split_sentences(text):
     return [s.strip() for s in re.split(r'(?<=[.!?])\s+', text.strip()) if s.strip()]
@@ -124,6 +174,8 @@ def wrap_words(words, font, max_px):
     return lines
 
 
+# ?? Frame rendering ???????????????????????????????????????????????????????????
+
 def render_subtitle_frame(sentence, highlight_word_idx, font, font_bold):
     if not sentence:
         return Image.new("RGBA", (VIDEO_W, VIDEO_H), (0, 0, 0, 0))
@@ -144,11 +196,11 @@ def render_subtitle_frame(sentence, highlight_word_idx, font, font_bold):
     box_x = (VIDEO_W - box_w) // 2
     box_y = int(VIDEO_H * 0.62)
 
-    img  = Image.new("RGBA", (VIDEO_W, VIDEO_H), (0, 0, 0, 0))
+    img     = Image.new("RGBA", (VIDEO_W, VIDEO_H), (0, 0, 0, 0))
     overlay = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 165))
     img.paste(overlay, (box_x, box_y), overlay)
 
-    draw = ImageDraw.Draw(img)
+    draw      = ImageDraw.Draw(img)
     global_wi = 0
     for li, line_words in enumerate(lines):
         lw, _    = measure_text(draw, " ".join(line_words), font)
@@ -156,9 +208,9 @@ def render_subtitle_frame(sentence, highlight_word_idx, font, font_bold):
         text_y   = box_y + pad_y + li * line_h
 
         for word in line_words:
-            is_hi  = (global_wi == highlight_word_idx)
-            color  = (255, 220, 0, 255) if is_hi else (255, 255, 255, 255)
-            ufont  = font_bold if is_hi else font
+            is_hi = (global_wi == highlight_word_idx)
+            color = (255, 220, 0, 255) if is_hi else (255, 255, 255, 255)
+            ufont = font_bold if is_hi else font
 
             draw.text((cursor_x + 2, text_y + 2), word, font=ufont, fill=(0, 0, 0, 200))
             draw.text((cursor_x, text_y), word, font=ufont, fill=color)
@@ -170,6 +222,8 @@ def render_subtitle_frame(sentence, highlight_word_idx, font, font_bold):
 
     return img
 
+
+# ?? Video helpers ?????????????????????????????????????????????????????????????
 
 def get_video_duration(path):
     r = subprocess.run(
@@ -215,11 +269,11 @@ def composite_subtitle_frames(bg_clip, frames_dir, audio_path, output_path, fps=
 
 
 def build_timeline(text, audio_duration, fps=30):
-    sentences   = split_sentences(text)
-    total_chars = max(sum(len(s) for s in sentences), 1)
+    sentences    = split_sentences(text)
+    total_chars  = max(sum(len(s) for s in sentences), 1)
     total_frames = int((audio_duration + 0.5) * fps)
-    timeline    = []
-    char_ptr    = 0
+    timeline     = []
+    char_ptr     = 0
 
     for sentence in sentences:
         words = sentence.split()
@@ -256,7 +310,7 @@ def make_video(text, audio_path, audio_duration, bg_path, output_path, fps=30):
         for fi in range(total_frames):
             state = timeline[fi]
             if state != prev_state:
-                prev_img  = render_subtitle_frame(state[0], state[1], font, font_bold)
+                prev_img   = render_subtitle_frame(state[0], state[1], font, font_bold)
                 prev_state = state
             prev_img.save(os.path.join(frames_dir, f"frame_{fi:06d}.png"))
 
@@ -269,8 +323,8 @@ def make_video(text, audio_path, audio_duration, bg_path, output_path, fps=30):
 
 def generate_tts(pipeline, text, output_path):
     generator = pipeline(text, voice=VOICE, speed=1.0, split_pattern=r"\n+")
-    chunks = [audio for _, _, audio in generator]
-    combined = np.concatenate(chunks)
+    chunks    = [audio for _, _, audio in generator]
+    combined  = np.concatenate(chunks)
     sf.write(output_path, combined, 24000)
     duration = len(combined) / 24000
     print(f"TTS: {output_path} ({duration:.1f}s)")
@@ -284,6 +338,8 @@ def pick_background(index):
     return backgrounds[index % len(backgrounds)]
 
 
+# ?? Entry point ???????????????????????????????????????????????????????????????
+
 def main():
     subreddit = os.environ.get("SUBREDDIT", "AmItheAsshole")
     limit     = int(os.environ.get("LIMIT", "5"))
@@ -292,11 +348,16 @@ def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     os.makedirs("audio", exist_ok=True)
 
-    posts    = scrape_posts(subreddit, limit)
+    # Load tracking before fetching so we can skip seen posts at the API level
+    tracking = load_tracking()
+    seen_ids = set(tracking["seen_posts"].keys())
+    print(f"Loaded {len(seen_ids)} previously-seen post IDs from {TRACKING_FILE}")
+
+    posts    = scrape_posts(subreddit, limit, seen_ids)
     pipeline = KPipeline(lang_code="a")
 
     for i, post in enumerate(posts):
-        print(f"\n--- Post {i+1}/{len(posts)}: {post['title']}")
+        print(f"\n--- Post {i+1}/{len(posts)}: {post['title']} (id={post['id']})")
         body = post["body"] or ""
         text = censor(post["title"])
         if body:
@@ -304,12 +365,19 @@ def main():
 
         audio_path  = f"audio/post_{i+1}.wav"
         output_path = f"{OUT_DIR}/video_{i+1}.mp4"
+        success     = False
 
         try:
             duration = generate_tts(pipeline, text, audio_path)
             make_video(text, audio_path, duration, pick_background(i), output_path)
+            success = True
         except Exception as e:
             print(f"  Failed: {e}")
+        finally:
+            # Always mark the post as seen and persist ? even on failure ?
+            # so a broken post doesn't get retried forever.
+            mark_seen(tracking, post, subreddit, success)
+            save_tracking(tracking)
 
     print(f"\nAll done ? {OUT_DIR}/")
 
