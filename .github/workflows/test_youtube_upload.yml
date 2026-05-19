@@ -1,0 +1,42 @@
+name: Test YouTube Upload
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-upload:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install Python deps
+        run: |
+          pip install \
+            google-api-python-client \
+            google-auth \
+            google-auth-oauthlib \
+            google-auth-httplib2
+
+      - name: Write OAuth token to disk
+        env:
+          YOUTUBE_TOKEN: ${{ secrets.YOUTUBE_TOKEN }}
+        run: |
+          echo "$YOUTUBE_TOKEN" | base64 --decode > token.pkl
+
+      - name: Create a dummy test video
+        run: |
+          sudo apt-get install -y ffmpeg
+          ffmpeg -f lavfi -i color=c=blue:size=1080x1920:duration=5 \
+                 -f lavfi -i sine=frequency=1000:duration=5 \
+                 -c:v libx264 -c:a aac -shortest \
+                 test_video.mp4
+
+      - name: Upload test video to YouTube
+        run: python3 upload_to_youtube.py --file test_video.mp4 --title "Test Upload - Delete Me" --privacy private
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f token.pkl test_video.mp4
