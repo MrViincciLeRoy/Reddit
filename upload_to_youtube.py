@@ -1,27 +1,28 @@
 """
 upload_to_youtube.py
 --------------------
-Uploads a video file to YouTube using a pre-existing OAuth token stored in
-token.pkl (base64-decoded from the YOUTUBE_TOKEN GitHub secret).
+Reads results/metadata.json produced by make_video.py and uploads every
+successfully-generated video to YouTube.
 
-Usage:
-    python3 upload_to_youtube.py \
-        --file results/video_1.mp4 \
-        --title "My Reddit Story" \
-        --privacy private
+Auth: token.pkl must exist on disk (written by the GitHub Actions step that
+base64-decodes the YOUTUBE_TOKEN secret).
+
+Usage (manual / CI):
+    python3 upload_to_youtube.py
 """
 
-import argparse
-import pickle
+import json
 import os
+import pickle
 import sys
 
+from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-from google.auth.transport.requests import Request
 
-TOKEN_PATH = "token.pkl"
-SCOPES     = ["https://www.googleapis.com/auth/youtube.upload"]
+TOKEN_PATH    = "token.pkl"
+METADATA_PATH = "results/metadata.json"
+SCOPES        = ["https://www.googleapis.com/auth/youtube.upload"]
 
 
 def get_authenticated_service():
@@ -30,35 +31,30 @@ def get_authenticated_service():
             f"{TOKEN_PATH} not found. "
             "Make sure the 'Write OAuth token to disk' step ran first."
         )
-
     with open(TOKEN_PATH, "rb") as f:
         creds = pickle.load(f)
 
-    # Refresh if expired
     if creds.expired and creds.refresh_token:
         print("Token expired — refreshing...")
         creds.refresh(Request())
-        # Persist the refreshed token so future runs don't have to refresh again
         with open(TOKEN_PATH, "wb") as f:
             pickle.dump(creds, f)
-        print("Token refreshed and saved.")
+        print("Token refreshed.")
 
     return build("youtube", "v3", credentials=creds)
 
 
-def upload_video(youtube, file_path, title, description="", privacy="private", category_id="22"):
-    """
-    category_id 22 = People & Blogs (a safe default for Reddit content).
-    See https://developers.google.com/youtube/v3/docs/videoCategories/list
-    """
+def upload_video(youtube, file_path: str, title: str, privacy: str = "public"):
+    """Upload one video. Returns the YouTube video ID."""
     body = {
         "snippet": {
             "title":       title,
-            "description": description,
-            "categoryId":  category_id,
+            "description": "#Shorts #AITA #Reddit",
+            "tags":        ["AITA", "Reddit", "Shorts", "AmITheAsshole"],
+            "categoryId":  "22",   # People & Blogs
         },
         "status": {
-            "privacyStatus":          privacy,
+            "privacyStatus":           privacy,
             "selfDeclaredMadeForKids": False,
         },
     }
@@ -67,45 +63,58 @@ def upload_video(youtube, file_path, title, description="", privacy="private", c
         file_path,
         mimetype="video/mp4",
         resumable=True,
-        chunksize=8 * 1024 * 1024,   # 8 MB chunks
+        chunksize=8 * 1024 * 1024,  # 8 MB chunks
     )
 
-    print(f"Uploading: {file_path}")
+    print(f"\nUploading: {file_path}")
     print(f"  Title:   {title}")
     print(f"  Privacy: {privacy}")
 
     request  = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
     response = None
-
     while response is None:
         status, response = request.next_chunk()
         if status:
-            pct = int(status.progress() * 100)
-            print(f"  Progress: {pct}%")
+            print(f"  Progress: {int(status.progress() * 100)}%")
 
-    video_id  = response.get("id", "unknown")
-    video_url = f"https://www.youtube.com/watch?v={video_id}"
-    print(f"\nUpload complete!")
-    print(f"  Video ID:  {video_id}")
-    print(f"  Video URL: {video_url}")
+    video_id = response.get("id", "unknown")
+    print(f"  ✓ https://www.youtube.com/watch?v={video_id}")
     return video_id
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Upload a video to YouTube.")
-    parser.add_argument("--file",    required=True,              help="Path to the .mp4 file")
-    parser.add_argument("--title",   required=True,              help="Video title")
-    parser.add_argument("--desc",    default="",                 help="Video description")
-    parser.add_argument("--privacy", default="private",
-                        choices=["public", "private", "unlisted"], help="Privacy setting")
-    args = parser.parse_args()
+    if not os.path.exists(METADATA_PATH):
+        print(f"No metadata found at {METADATA_PATH} — nothing to upload.")
+        sys.exit(0)
 
-    if not os.path.exists(args.file):
-        print(f"ERROR: File not found: {args.file}", file=sys.stderr)
-        sys.exit(1)
+    with open(METADATA_PATH, "r", encoding="utf-8") as f:
+        metadata = json.load(f)
 
+    to_upload = [m for m in metadata if m.get("success") and os.path.exists(m["file"])]
+    if not to_upload:
+        print("No successful videos to upload.")
+        sys.exit(0)
+
+    print(f"Found {len(to_upload)} video(s) to upload.")
     youtube = get_authenticated_service()
-    upload_video(youtube, args.file, args.title, args.desc, args.privacy)
+
+    uploaded, failed = [], []
+    for item in to_upload:
+        try:
+            vid_id = upload_video(youtube, item["file"], item["yt_title"])
+            uploaded.append(vid_id)
+        except Exception as e:
+            print(f"  ✗ Failed to upload {item['file']}: {e}")
+            failed.append(item["file"])
+
+    print(f"\n── Summary ──────────────────────────────")
+    print(f"  Uploaded : {len(uploaded)}")
+    print(f"  Failed   : {len(failed)}")
+    if failed:
+        print("  Failed files:")
+        for f in failed:
+            print(f"    {f}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

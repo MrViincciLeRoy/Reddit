@@ -67,7 +67,6 @@ PROFANITY_MAP = {
 # ?? Tracking helpers ??????????????????????????????????????????????????????????
 
 def load_tracking():
-    """Return the full tracking dict, creating it if missing."""
     os.makedirs("data", exist_ok=True)
     if os.path.exists(TRACKING_FILE):
         with open(TRACKING_FILE, "r", encoding="utf-8") as f:
@@ -76,7 +75,6 @@ def load_tracking():
 
 
 def save_tracking(tracking: dict):
-    """Persist the tracking dict to disk."""
     os.makedirs("data", exist_ok=True)
     with open(TRACKING_FILE, "w", encoding="utf-8") as f:
         json.dump(tracking, f, indent=2, ensure_ascii=False)
@@ -84,7 +82,6 @@ def save_tracking(tracking: dict):
 
 
 def mark_seen(tracking: dict, post: dict, subreddit: str, success: bool):
-    """Record a post in the tracking dict (called after every attempt)."""
     tracking["seen_posts"][post["id"]] = {
         "title":        post["title"],
         "subreddit":    subreddit,
@@ -105,11 +102,18 @@ def full_subreddit_name(sub):
     return SUBREDDIT_NAMES.get(sub.lower(), sub)
 
 
+def expand_aita(title: str) -> str:
+    """Replace AITA abbreviation with the full phrase for YouTube titles."""
+    return re.sub(r'\bAITA\b', 'Am I The A-hole', title, flags=re.IGNORECASE)
+
+
+def format_yt_title(raw_title: str) -> str:
+    """Expand AITA and enforce YouTube's 100-char title limit."""
+    title = expand_aita(raw_title)
+    return title[:100]
+
+
 def scrape_posts(subreddit, limit, seen_ids: set):
-    """
-    Fetch up to `limit` unseen top posts from today.
-    We over-fetch (limit * 3, capped at 100) so we have room to skip seen ones.
-    """
     fetch_n = min(limit * 3, 100)
     url = f"https://www.reddit.com/r/{subreddit}/top.json?limit={fetch_n}&t=day"
     r = requests.get(url, headers=HEADERS, proxies=PROXIES, timeout=30)
@@ -348,13 +352,15 @@ def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     os.makedirs("audio", exist_ok=True)
 
-    # Load tracking before fetching so we can skip seen posts at the API level
     tracking = load_tracking()
     seen_ids = set(tracking["seen_posts"].keys())
     print(f"Loaded {len(seen_ids)} previously-seen post IDs from {TRACKING_FILE}")
 
     posts    = scrape_posts(subreddit, limit, seen_ids)
     pipeline = KPipeline(lang_code="a")
+
+    # Metadata file so the upload step knows each video's YouTube title
+    metadata = []
 
     for i, post in enumerate(posts):
         print(f"\n--- Post {i+1}/{len(posts)}: {post['title']} (id={post['id']})")
@@ -374,12 +380,22 @@ def main():
         except Exception as e:
             print(f"  Failed: {e}")
         finally:
-            # Always mark the post as seen and persist ? even on failure ?
-            # so a broken post doesn't get retried forever.
             mark_seen(tracking, post, subreddit, success)
             save_tracking(tracking)
 
-    print(f"\nAll done ? {OUT_DIR}/")
+        metadata.append({
+            "file":      output_path,
+            "yt_title":  format_yt_title(post["title"]),
+            "post_id":   post["id"],
+            "success":   success,
+        })
+
+    # Write metadata for the upload step
+    metadata_path = f"{OUT_DIR}/metadata.json"
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2, ensure_ascii=False)
+    print(f"\nMetadata written ? {metadata_path}")
+    print(f"All done ? {OUT_DIR}/")
 
 
 if __name__ == "__main__":
