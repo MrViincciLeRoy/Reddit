@@ -46,10 +46,15 @@ def get_authenticated_service():
 
 def upload_video(youtube, file_path: str, title: str, privacy: str = "public"):
     """Upload one video. Returns the YouTube video ID."""
+    # YouTube classifies a video as a Short when it is vertical (9:16),
+    # under 60 seconds, AND has #Shorts in the title or description.
+    # We put it in both to be safe.
+    shorts_title = f"{title} #Shorts"[:100]   # YouTube title hard limit is 100 chars
+
     body = {
         "snippet": {
-            "title":       title,
-            "description": "#Shorts #AITA #Reddit",
+            "title":       shorts_title,
+            "description": "#Shorts #AITA #Reddit #AmITheAsshole",
             "tags":        ["AITA", "Reddit", "Shorts", "AmITheAsshole"],
             "categoryId":  "22",   # People & Blogs
         },

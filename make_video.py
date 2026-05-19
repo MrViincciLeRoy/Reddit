@@ -366,6 +366,7 @@ def main():
         print(f"\n--- Post {i+1}/{len(posts)}: {post['title']} (id={post['id']})")
         body = post["body"] or ""
         text = censor(post["title"])
+        text = expand_aita(text)
         if body:
             text += ". " + censor(body)
 
