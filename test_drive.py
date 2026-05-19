@@ -14,11 +14,8 @@ BACKGROUNDS = {
 def get_service():
     raw = os.environ.get("GDRIVE_SERVICE_ACCOUNT", "").strip()
     if not raw:
-        raise ValueError("GDRIVE_SERVICE_ACCOUNT secret is empty or not set")
-    try:
-        creds_json = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"GDRIVE_SERVICE_ACCOUNT is not valid JSON: {e}\nFirst 50 chars: {repr(raw[:50])}")
+        raise ValueError("GDRIVE_SERVICE_ACCOUNT is empty or not set")
+    creds_json = json.loads(raw)
     creds = service_account.Credentials.from_service_account_info(
         creds_json,
         scopes=["https://www.googleapis.com/auth/drive.readonly"]
@@ -33,21 +30,26 @@ def download_file(service, file_id, output_path):
     done = False
     while not done:
         status, done = downloader.next_chunk()
-        print(f"  {output_path}: {int(status.progress() * 100)}%")
+        print(f"  {int(status.progress() * 100)}%")
+    fh.close()
 
 
 if __name__ == "__main__":
     os.makedirs("backgrounds", exist_ok=True)
     service = get_service()
+    print("Auth OK")
 
     for path, file_id in BACKGROUNDS.items():
         if not file_id:
-            print(f"Skipping {path} — no file ID set")
+            print(f"SKIP {path} — no file ID")
             continue
-        if os.path.exists(path):
-            print(f"Already cached: {path}")
-            continue
+
         print(f"Downloading {path}...")
         download_file(service, file_id, path)
+        size_mb = os.path.getsize(path) / (1024 * 1024)
+        print(f"OK — {size_mb:.1f} MB")
 
-    print("All backgrounds ready.")
+        os.remove(path)
+        print(f"Deleted {path}")
+
+    print("Test passed.")

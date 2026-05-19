@@ -1,6 +1,5 @@
 import os
 import re
-import sys
 import glob
 import subprocess
 import requests
@@ -16,14 +15,13 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-VOICE      = "af_heart"
-BACKGROUND = "backgrounds/minecraft.mp4"
-OUT_DIR    = "results"
+VOICE   = "af_heart"
+OUT_DIR = "results"
 
 
 def scrape_posts(subreddit, limit):
     url = f"https://www.reddit.com/r/{subreddit}/top.json?limit={limit}&t=day"
-    r   = requests.get(url, headers=HEADERS, proxies=PROXIES, timeout=30)
+    r = requests.get(url, headers=HEADERS, proxies=PROXIES, timeout=30)
     r.raise_for_status()
     posts = []
     for item in r.json()["data"]["children"]:
@@ -40,9 +38,9 @@ def scrape_posts(subreddit, limit):
 
 
 def generate_tts(text, output_path):
-    pipeline  = KPipeline(lang_code="a")
+    pipeline = KPipeline(lang_code="a")
     generator = pipeline(text, voice=VOICE, speed=1.0, split_pattern=r"\n+")
-    chunks    = []
+    chunks = []
     for _, _, audio in generator:
         chunks.append(audio)
     combined = np.concatenate(chunks)
@@ -74,10 +72,9 @@ def sanitize(text):
 
 def make_video(title, audio_path, background_path, output_path):
     duration = get_duration(audio_path) + 0.5
-    lines    = wrap_text(sanitize(title))
+    lines = wrap_text(sanitize(title))
 
     total_height = len(lines) * 70
-    start_y      = f"(h-{total_height})/2"
 
     drawtext_parts = []
     for i, line in enumerate(lines):
@@ -128,10 +125,10 @@ def pick_background(index):
 
 def main():
     subreddit = os.environ.get("SUBREDDIT", "AmItheAsshole")
-    limit     = int(os.environ.get("LIMIT", "5"))
+    limit = int(os.environ.get("LIMIT", "5"))
 
     os.makedirs(OUT_DIR, exist_ok=True)
-    os.makedirs("audio",  exist_ok=True)
+    os.makedirs("audio", exist_ok=True)
 
     posts = scrape_posts(subreddit, limit)
 
@@ -143,9 +140,9 @@ def main():
         if post["body"]:
             text += ". " + post["body"]
 
-        audio_path  = f"audio/post_{i+1}.wav"
+        audio_path = f"audio/post_{i+1}.wav"
         output_path = f"{OUT_DIR}/video_{i+1}.mp4"
-        bg_path     = pick_background(i)
+        bg_path = pick_background(i)
 
         try:
             generate_tts(text, audio_path)
