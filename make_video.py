@@ -365,10 +365,9 @@ def main():
     for i, post in enumerate(posts):
         print(f"\n--- Post {i+1}/{len(posts)}: {post['title']} (id={post['id']})")
         body = post["body"] or ""
-        text = censor(post["title"])
-        text = expand_aita(text)
+        text = expand_aita(censor(post["title"]))
         if body:
-            text += ". " + censor(body)
+            text += ". " + expand_aita(censor(body))
 
         audio_path  = f"audio/post_{i+1}.wav"
         output_path = f"{OUT_DIR}/video_{i+1}.mp4"
