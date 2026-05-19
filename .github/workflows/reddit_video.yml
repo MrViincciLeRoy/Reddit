@@ -1,0 +1,79 @@
+name: Reddit Video Generator
+
+on:
+  workflow_dispatch:
+    inputs:
+      subreddit:
+        description: 'Subreddit to pull from'
+        required: true
+        default: 'AmItheAsshole'
+      limit:
+        description: 'Number of videos to generate'
+        required: true
+        default: '3'
+      background:
+        description: 'Background video to use (minecraft / subway_surfers)'
+        required: true
+        default: 'minecraft'
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tor ffmpeg espeak-ng libsndfile1
+
+      - name: Start Tor
+        run: |
+          sudo service tor start
+          sleep 15
+
+      - name: Install Python deps
+        run: |
+          pip install \
+            requests[socks] \
+            "kokoro>=0.9.4" \
+            soundfile \
+            numpy \
+            google-api-python-client \
+            google-auth
+
+      - name: Verify installs
+        run: |
+          ffmpeg -version | head -n 1
+          python3 -c "from kokoro import KPipeline; print('Kokoro ready')"
+
+      - name: Cache background videos
+        id: cache-backgrounds
+        uses: actions/cache@v4
+        with:
+          path: backgrounds/
+          key: backgrounds-${{ inputs.background }}-v1
+
+      - name: Download backgrounds from Google Drive
+        if: steps.cache-backgrounds.outputs.cache-hit != 'true'
+        env:
+          GDRIVE_SERVICE_ACCOUNT: ${{ secrets.GDRIVE_SERVICE_ACCOUNT }}
+          GDRIVE_MINECRAFT_ID:    ${{ secrets.GDRIVE_MINECRAFT_ID }}
+          GDRIVE_SUBWAY_ID:       ${{ secrets.GDRIVE_SUBWAY_ID }}
+        run: python3 download_from_drive.py
+
+      - name: Generate videos
+        env:
+          SUBREDDIT: ${{ github.event.inputs.subreddit }}
+          LIMIT:     ${{ github.event.inputs.limit }}
+        run: python3 make_video.py
+
+      - name: Upload videos
+        uses: actions/upload-artifact@v4
+        with:
+          name: reddit-videos-${{ github.event.inputs.subreddit }}-run${{ github.run_number }}
+          path: results/
+          retention-days: 7
