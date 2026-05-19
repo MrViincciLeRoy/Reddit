@@ -45,7 +45,8 @@ def generate_tts(text, output_path):
         chunks.append(audio)
     combined = np.concatenate(chunks)
     sf.write(output_path, combined, 24000)
-    print(f"TTS saved: {output_path}")
+    duration = len(combined) / 24000
+    print(f"TTS saved: {output_path} ({duration:.1f}s)")
 
 
 def get_duration(audio_path):
@@ -73,7 +74,6 @@ def sanitize(text):
 def make_video(title, audio_path, background_path, output_path):
     duration = get_duration(audio_path) + 0.5
     lines = wrap_text(sanitize(title))
-
     total_height = len(lines) * 70
 
     drawtext_parts = []
@@ -111,8 +111,13 @@ def make_video(title, audio_path, background_path, output_path):
     ]
 
     print(f"Rendering: {output_path}")
-    subprocess.run(cmd, check=True, capture_output=True)
+    result = subprocess.run(cmd, capture_output=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed with exit code {result.returncode}")
+
     size_mb = os.path.getsize(output_path) / (1024 * 1024)
+    if size_mb == 0:
+        raise RuntimeError(f"Output file is 0 bytes: {output_path}")
     print(f"Done: {output_path} ({size_mb:.1f} MB)")
 
 
