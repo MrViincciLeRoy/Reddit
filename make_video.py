@@ -3,10 +3,12 @@ import re
 import glob
 import random
 import subprocess
+import tempfile
 import requests
 import soundfile as sf
 from kokoro import KPipeline
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
 PROXIES = {
     "http":  "socks5h://127.0.0.1:9050",
@@ -16,21 +18,24 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-VOICE   = "af_heart"
-OUT_DIR = "results"
+VOICE      = "af_heart"
+OUT_DIR    = "results"
+FONT_SIZE  = 52
+MAX_WIDTH  = 900
+VIDEO_W    = 1080
+VIDEO_H    = 1920
 
 SUBREDDIT_NAMES = {
-    "amitheasshole":    "Am I the Asshole",
-    "tifu":             "Today I Fucked Up",
+    "amitheasshole":       "Am I the Asshole",
+    "tifu":                "Today I Fucked Up",
     "relationship_advice": "Relationship Advice",
     "maliciouscompliance": "Malicious Compliance",
-    "pettyrevenge":     "Petty Revenge",
-    "prorevenge":       "Pro Revenge",
-    "entitledparents":  "Entitled Parents",
-    "notifu":           "Not Today I Fucked Up",
-    "confessions":      "Confessions",
-    "AITA":      "Am I The A-hole",
-    "offmychest":       "Off My Chest",
+    "pettyrevenge":        "Petty Revenge",
+    "prorevenge":          "Pro Revenge",
+    "entitledparents":     "Entitled Parents",
+    "confessions":         "Confessions",
+    "AITA":      "Am I the A-hole",
+    "offmychest":          "Off My Chest",
 }
 
 PROFANITY_MAP = {
@@ -39,7 +44,6 @@ PROFANITY_MAP = {
     r"\bfucker\b":  "f*cker",
     r"\bfucking\b": "f*cking",
     r"\bfucks\b":   "f*cks",
-    r"\bfuck'?s\b": "f*ck's",
     r"\bbitch\b":   "b*tch",
     r"\bbitches\b": "b*tches",
     r"\basshole\b": "a**hole",
@@ -54,7 +58,6 @@ PROFANITY_MAP = {
     r"\bnigger\b":  "n*****",
     r"\bfaggot\b":  "f*ggot",
     r"\bretard\b":  "r*tard",
-    # "shit" intentionally excluded
 }
 
 
@@ -76,167 +79,202 @@ def scrape_posts(subreddit, limit):
     for item in r.json()["data"]["children"]:
         d = item["data"]
         posts.append({
-            "title":    d["title"],
-            "score":    d["score"],
-            "comments": d["num_comments"],
-            "url":      f"https://reddit.com{d['permalink']}",
-            "body":     d.get("selftext", "")[:800],
+            "title": d["title"],
+            "body":  d.get("selftext", "")[:800],
         })
     print(f"Fetched {len(posts)} posts from r/{subreddit}")
     return posts
 
 
-def split_into_sentences(text):
-    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
-    return [s.strip() for s in sentences if s.strip()]
+def split_sentences(text):
+    return [s.strip() for s in re.split(r'(?<=[.!?])\s+', text.strip()) if s.strip()]
 
 
-def generate_tts_with_timing(pipeline, text, output_path):
-    generator = pipeline(text, voice=VOICE, speed=1.0, split_pattern=r"\n+")
-    chunks = []
-    for _, _, audio in generator:
-        chunks.append(audio)
-    combined = np.concatenate(chunks)
-    sf.write(output_path, combined, 24000)
-    duration = len(combined) / 24000
-    print(f"TTS saved: {output_path} ({duration:.1f}s)")
-    return duration
+def get_font(size=FONT_SIZE, bold=False):
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf" if bold else "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return ImageFont.truetype(path, size)
+    return ImageFont.load_default()
+
+
+def measure_text(draw, text, font):
+    bbox = draw.textbbox((0, 0), text, font=font)
+    return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+
+def wrap_words(words, font, max_px):
+    dummy = Image.new("RGBA", (1, 1))
+    draw  = ImageDraw.Draw(dummy)
+    lines, line = [], []
+    for word in words:
+        test = " ".join(line + [word])
+        w, _ = measure_text(draw, test, font)
+        if w > max_px and line:
+            lines.append(line)
+            line = [word]
+        else:
+            line.append(word)
+    if line:
+        lines.append(line)
+    return lines
+
+
+def render_subtitle_frame(sentence, highlight_word_idx, font, font_bold):
+    if not sentence:
+        return Image.new("RGBA", (VIDEO_W, VIDEO_H), (0, 0, 0, 0))
+
+    words  = sentence.split()
+    lines  = wrap_words(words, font, MAX_WIDTH)
+
+    pad_x, pad_y = 28, 18
+    line_h  = FONT_SIZE + 12
+    total_h = len(lines) * line_h
+
+    dummy = Image.new("RGBA", (1, 1))
+    draw  = ImageDraw.Draw(dummy)
+    line_widths = [measure_text(draw, " ".join(ln), font)[0] for ln in lines]
+
+    box_w = min(max(line_widths) + pad_x * 2, VIDEO_W - 40)
+    box_h = total_h + pad_y * 2
+    box_x = (VIDEO_W - box_w) // 2
+    box_y = int(VIDEO_H * 0.62)
+
+    img  = Image.new("RGBA", (VIDEO_W, VIDEO_H), (0, 0, 0, 0))
+    overlay = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 165))
+    img.paste(overlay, (box_x, box_y), overlay)
+
+    draw = ImageDraw.Draw(img)
+    global_wi = 0
+    for li, line_words in enumerate(lines):
+        lw, _    = measure_text(draw, " ".join(line_words), font)
+        cursor_x = (VIDEO_W - lw) // 2
+        text_y   = box_y + pad_y + li * line_h
+
+        for word in line_words:
+            is_hi  = (global_wi == highlight_word_idx)
+            color  = (255, 220, 0, 255) if is_hi else (255, 255, 255, 255)
+            ufont  = font_bold if is_hi else font
+
+            draw.text((cursor_x + 2, text_y + 2), word, font=ufont, fill=(0, 0, 0, 200))
+            draw.text((cursor_x, text_y), word, font=ufont, fill=color)
+
+            ww, _ = measure_text(draw, word, ufont)
+            sw, _ = measure_text(draw, " ", font)
+            cursor_x += ww + sw
+            global_wi += 1
+
+    return img
 
 
 def get_video_duration(path):
-    result = subprocess.run(
+    r = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
          "-of", "default=noprint_wrappers=1:nokey=1", path],
         capture_output=True, text=True
     )
-    return float(result.stdout.strip())
+    return float(r.stdout.strip())
 
 
-def get_random_start(bg_path, needed_duration):
+def extract_random_bg_clip(bg_path, duration, output_path, fps=30):
     total = get_video_duration(bg_path)
-    max_start = max(0, total - needed_duration - 1)
-    return random.uniform(0, max_start)
+    start = random.uniform(0, max(0, total - duration - 1))
+    cmd = [
+        "ffmpeg", "-ss", str(start), "-i", bg_path,
+        "-t", str(duration),
+        "-vf", "scale=-2:1920,crop=1080:1920",
+        "-r", str(fps),
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+        "-an", "-y", output_path
+    ]
+    print(f"  BG clip: {start:.1f}s for {duration:.1f}s")
+    subprocess.run(cmd, capture_output=True, check=True)
 
 
-def sanitize_drawtext(text):
-    return re.sub(r"[':\"\\@%]", "", text)
+def composite_subtitle_frames(bg_clip, frames_dir, audio_path, output_path, fps=30):
+    cmd = [
+        "ffmpeg",
+        "-i", bg_clip,
+        "-framerate", str(fps),
+        "-i", os.path.join(frames_dir, "frame_%06d.png"),
+        "-i", audio_path,
+        "-filter_complex", "[0:v][1:v]overlay=0:0[v]",
+        "-map", "[v]", "-map", "2:a",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k",
+        "-shortest", "-y", output_path
+    ]
+    result = subprocess.run(cmd, capture_output=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"composite failed: {result.returncode}")
 
 
-def build_subtitle_drawtext(text, audio_duration, total_chars):
-    sentences = split_into_sentences(text)
-    if not sentences:
-        return []
-
-    drawtext_parts = []
-    char_count = 0
+def build_timeline(text, audio_duration, fps=30):
+    sentences   = split_sentences(text)
+    total_chars = max(sum(len(s) for s in sentences), 1)
+    total_frames = int((audio_duration + 0.5) * fps)
+    timeline    = []
+    char_ptr    = 0
 
     for sentence in sentences:
-        sentence_chars = len(sentence)
-        start_time = (char_count / total_chars) * audio_duration
-        end_time = ((char_count + sentence_chars) / total_chars) * audio_duration
-        char_count += sentence_chars + 1  # +1 for space
-
         words = sentence.split()
         if not words:
             continue
+        s_start = (char_ptr / total_chars) * audio_duration
+        s_end   = ((char_ptr + len(sentence)) / total_chars) * audio_duration
+        s_dur   = max(s_end - s_start, 0.01)
+        wdur    = s_dur / len(words)
+        for wi in range(len(words)):
+            f_start = int((s_start + wi * wdur) * fps)
+            f_end   = int((s_start + (wi + 1) * wdur) * fps)
+            for f in range(f_start, f_end):
+                timeline.append((sentence, wi))
+        char_ptr += len(sentence) + 1
 
-        sentence_duration = end_time - start_time
-        word_duration = sentence_duration / len(words)
-
-        safe_sentence = sanitize_drawtext(sentence)
-
-        # Background box for the subtitle
-        drawtext_parts.append(
-            f"drawbox="
-            f"x=(w-800)/2:y=(h/2)-60:"
-            f"w=800:h=80:"
-            f"color=black@0.55:t=fill:"
-            f"enable='between(t,{start_time:.3f},{end_time:.3f})'"
-        )
-
-        # Full sentence (white)
-        drawtext_parts.append(
-            f"drawtext=text='{safe_sentence}':"
-            f"fontsize=42:"
-            f"fontcolor=white:"
-            f"borderw=2:"
-            f"bordercolor=black:"
-            f"x=(w-text_w)/2:"
-            f"y=(h/2)-40:"
-            f"font=Arial:"
-            f"enable='between(t,{start_time:.3f},{end_time:.3f})'"
-        )
-
-        # Highlight each word in yellow
-        for wi, word in enumerate(words):
-            word_start = start_time + wi * word_duration
-            word_end   = word_start + word_duration
-            safe_word  = sanitize_drawtext(word)
-
-            # Calculate x offset for the word within the sentence
-            prefix = " ".join(words[:wi])
-            prefix_len = len(prefix) + (1 if prefix else 0)
-            char_offset = prefix_len / max(len(sentence), 1)
-            # approx pixel offset (rough ? ffmpeg doesn't expose text_w per word)
-            x_expr = f"(w-text_w)/2+{int(char_offset * len(safe_sentence) * 22)}"
-
-            drawtext_parts.append(
-                f"drawtext=text='{safe_word}':"
-                f"fontsize=42:"
-                f"fontcolor=yellow:"
-                f"borderw=2:"
-                f"bordercolor=black:"
-                f"x={x_expr}:"
-                f"y=(h/2)-40:"
-                f"font=Arial:"
-                f"enable='between(t,{word_start:.3f},{word_end:.3f})'"
-            )
-
-    return drawtext_parts
+    while len(timeline) < total_frames:
+        timeline.append(timeline[-1] if timeline else ("", 0))
+    return timeline, total_frames
 
 
-def make_video(title, text, audio_path, audio_duration, background_path, output_path):
-    duration = audio_duration + 0.5
-    bg_start = get_random_start(background_path, duration)
+def make_video(text, audio_path, audio_duration, bg_path, output_path, fps=30):
+    font      = get_font(FONT_SIZE, bold=False)
+    font_bold = get_font(FONT_SIZE, bold=True)
 
-    censored_text = censor(text)
-    total_chars = max(len(censored_text), 1)
+    timeline, total_frames = build_timeline(text, audio_duration, fps)
 
-    subtitle_filters = build_subtitle_drawtext(censored_text, audio_duration, total_chars)
+    with tempfile.TemporaryDirectory() as frames_dir:
+        bg_clip = os.path.join(frames_dir, "bg.mp4")
+        extract_random_bg_clip(bg_path, audio_duration + 0.5, bg_clip, fps)
 
-    scale_crop = "scale=-2:1920,crop=1080:1920"
-    vf = scale_crop
-    if subtitle_filters:
-        vf += "," + ",".join(subtitle_filters)
+        print(f"  Rendering {total_frames} frames...")
+        prev_state, prev_img = None, None
+        for fi in range(total_frames):
+            state = timeline[fi]
+            if state != prev_state:
+                prev_img  = render_subtitle_frame(state[0], state[1], font, font_bold)
+                prev_state = state
+            prev_img.save(os.path.join(frames_dir, f"frame_{fi:06d}.png"))
 
-    cmd = [
-        "ffmpeg",
-        "-ss", str(bg_start),
-        "-stream_loop", "-1",
-        "-i", background_path,
-        "-i", audio_path,
-        "-vf", vf,
-        "-map", "0:v",
-        "-map", "1:a",
-        "-t", str(duration),
-        "-shortest",
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "23",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-y", output_path
-    ]
-
-    print(f"Rendering: {output_path} (bg starts at {bg_start:.1f}s)")
-    result = subprocess.run(cmd, capture_output=False)
-    if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed with exit code {result.returncode}")
+        print("  Compositing...")
+        composite_subtitle_frames(bg_clip, frames_dir, audio_path, output_path, fps)
 
     size_mb = os.path.getsize(output_path) / (1024 * 1024)
-    if size_mb == 0:
-        raise RuntimeError(f"Output file is 0 bytes: {output_path}")
     print(f"Done: {output_path} ({size_mb:.1f} MB)")
+
+
+def generate_tts(pipeline, text, output_path):
+    generator = pipeline(text, voice=VOICE, speed=1.0, split_pattern=r"\n+")
+    chunks = [audio for _, _, audio in generator]
+    combined = np.concatenate(chunks)
+    sf.write(output_path, combined, 24000)
+    duration = len(combined) / 24000
+    print(f"TTS: {output_path} ({duration:.1f}s)")
+    return duration
 
 
 def pick_background(index):
@@ -248,40 +286,32 @@ def pick_background(index):
 
 def main():
     subreddit = os.environ.get("SUBREDDIT", "AmItheAsshole")
-    limit = int(os.environ.get("LIMIT", "5"))
-
-    full_name = full_subreddit_name(subreddit)
-    print(f"Subreddit: r/{subreddit} ? \"{full_name}\"")
+    limit     = int(os.environ.get("LIMIT", "5"))
+    print(f"Subreddit: r/{subreddit} ? \"{full_subreddit_name(subreddit)}\"")
 
     os.makedirs(OUT_DIR, exist_ok=True)
     os.makedirs("audio", exist_ok=True)
 
-    posts = scrape_posts(subreddit, limit)
+    posts    = scrape_posts(subreddit, limit)
     pipeline = KPipeline(lang_code="a")
 
     for i, post in enumerate(posts):
-        print(f"\n--- Post {i+1}/{len(posts)} ---")
-        print(f"Title: {post['title']}")
-
-        title_censored = censor(post["title"])
-        body_censored  = censor(post["body"]) if post["body"] else ""
-
-        text = title_censored
-        if body_censored:
-            text += ". " + body_censored
+        print(f"\n--- Post {i+1}/{len(posts)}: {post['title']}")
+        body = post["body"] or ""
+        text = censor(post["title"])
+        if body:
+            text += ". " + censor(body)
 
         audio_path  = f"audio/post_{i+1}.wav"
         output_path = f"{OUT_DIR}/video_{i+1}.mp4"
-        bg_path     = pick_background(i)
 
         try:
-            duration = generate_tts_with_timing(pipeline, text, audio_path)
-            make_video(post["title"], text, audio_path, duration, bg_path, output_path)
+            duration = generate_tts(pipeline, text, audio_path)
+            make_video(text, audio_path, duration, pick_background(i), output_path)
         except Exception as e:
-            print(f"Failed on post {i+1}: {e}")
-            continue
+            print(f"  Failed: {e}")
 
-    print(f"\nAll done. Videos in: {OUT_DIR}/")
+    print(f"\nAll done ? {OUT_DIR}/")
 
 
 if __name__ == "__main__":
