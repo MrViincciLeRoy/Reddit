@@ -6,7 +6,8 @@ name: Reddit Video Generator
 # GitHub Actions: ~25 min ? 6 runs ? 4 weeks ? 600 min/month (limit is 2,000)
 on:
   schedule:
-    - cron: '0 10 * * 1-6'   # Mon?Sat 10:00 UTC
+    - cron: '0 1 * * 5,3,6'   # Fri/Wed/Sat 01:00 UTC (best engagement: 5.4 avg)
+    - cron: '0 14 * * 1,2'    # Mon/Tue 14:00 UTC (2nd best: 5.24 avg)
 
   # Keep manual trigger for testing / one-off runs
   workflow_dispatch:
