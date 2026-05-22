@@ -3,6 +3,7 @@ import re
 import glob
 import json
 import random
+import hashlib
 import subprocess
 import tempfile
 import datetime
@@ -20,7 +21,6 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-VOICE         = "af_heart"
 OUT_DIR       = "results"
 TRACKING_FILE = "data/seen_posts.json"
 FONT_SIZE     = 52
@@ -28,6 +28,16 @@ MAX_WIDTH     = 900
 VIDEO_W       = 1080
 VIDEO_H       = 1920
 MAX_BODY_CHARS = 4000
+
+# All valid Kokoro voices (af=American female, am=American male, bf=British female, bm=British male)
+KOKORO_VOICES = [
+    "af_heart", "af_alloy", "af_aoede", "af_bella", "af_jessica",
+    "af_kore", "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky",
+    "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam",
+    "am_michael", "am_onyx", "am_puck", "am_santa",
+    "bf_alice", "bf_emma", "bf_isabella", "bf_lily",
+    "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
+]
 
 SUBREDDIT_NAMES = {
     "amitheasshole":       "Am I the Asshole",
@@ -65,7 +75,49 @@ PROFANITY_MAP = {
 }
 
 
-# ?? Tracking helpers ??????????????????????????????????????????????????????????
+# ── Entropy-based seeding ──────────────────────────────────────────────────────
+# Combines wall-clock readings expressed in three timezones + post_id hash.
+# Haiti = UTC-5, Johannesburg = UTC+2. Same underlying moment but different
+# numeric representations when formatted → hashing them together with the
+# post_id gives unique, hard-to-predict seeds per video.
+
+def make_seed(post_id: str, index: int) -> int:
+    now_utc  = datetime.datetime.utcnow()
+    haiti_dt = now_utc - datetime.timedelta(hours=5)
+    joburg_dt = now_utc + datetime.timedelta(hours=2)
+
+    entropy = (
+        f"{now_utc.strftime('%Y%m%d%H%M%S%f')}"
+        f"{haiti_dt.strftime('%Y%m%d%H%M%S%f')}"
+        f"{joburg_dt.strftime('%Y%m%d%H%M%S%f')}"
+        f"{post_id}{index}"
+    )
+    return int(hashlib.sha256(entropy.encode()).hexdigest(), 16) % (2**32)
+
+
+def seeded_rng(post_id: str, index: int) -> random.Random:
+    rng = random.Random()
+    rng.seed(make_seed(post_id, index))
+    return rng
+
+
+def pick_voice(rng: random.Random) -> str:
+    voices = KOKORO_VOICES[:]
+    rng.shuffle(voices)
+    return voices[0]
+
+
+# ── Privacy distribution ───────────────────────────────────────────────────────
+# Index 0 → unlisted, index 1 → private ("scheduled"), rest → public
+def get_privacy(index: int) -> str:
+    if index == 0:
+        return "unlisted"
+    if index == 1:
+        return "private"
+    return "public"
+
+
+# ── Tracking helpers ───────────────────────────────────────────────────────────
 
 def load_tracking():
     os.makedirs("data", exist_ok=True)
@@ -91,7 +143,7 @@ def mark_seen(tracking: dict, post: dict, subreddit: str, success: bool):
     }
 
 
-# ?? Reddit helpers ????????????????????????????????????????????????????????????
+# ── Reddit helpers ─────────────────────────────────────────────────────────────
 
 def censor(text):
     for pattern, replacement in PROFANITY_MAP.items():
@@ -108,12 +160,10 @@ def expand_aita(title: str) -> str:
 
 
 def format_yt_title(raw_title: str) -> str:
-    title = expand_aita(raw_title)
-    return title[:100]
+    return expand_aita(raw_title)[:100]
 
 
 def reddit_get(url, retries=5):
-    """GET with exponential backoff on 429."""
     import time
     delay = 10
     for attempt in range(retries):
@@ -129,15 +179,9 @@ def reddit_get(url, retries=5):
 
 
 FALLBACK_SUBREDDITS = [
-    "AmItheAsshole",
-    "tifu",
-    "relationship_advice",
-    "maliciouscompliance",
-    "pettyrevenge",
-    "prorevenge",
-    "entitledparents",
-    "offmychest",
-    "confessions",
+    "AmItheAsshole", "tifu", "relationship_advice",
+    "maliciouscompliance", "pettyrevenge", "prorevenge",
+    "entitledparents", "offmychest", "confessions",
 ]
 
 
@@ -159,16 +203,10 @@ def scrape_from_subreddit(subreddit, limit, seen_ids: set):
             continue
         raw_body = d.get("selftext", "")
         if len(raw_body) > MAX_BODY_CHARS:
-            # Trim to last complete sentence so we never cut mid-sentence
-            trimmed = raw_body[:MAX_BODY_CHARS]
+            trimmed  = raw_body[:MAX_BODY_CHARS]
             last_end = max(trimmed.rfind(". "), trimmed.rfind("? "), trimmed.rfind("! "))
             raw_body = trimmed[:last_end + 1] if last_end != -1 else trimmed
-        posts.append({
-            "id":        post_id,
-            "title":     d["title"],
-            "body":      raw_body,
-            "subreddit": subreddit,
-        })
+        posts.append({"id": post_id, "title": d["title"], "body": raw_body, "subreddit": subreddit})
         if len(posts) == limit:
             break
 
@@ -177,22 +215,19 @@ def scrape_from_subreddit(subreddit, limit, seen_ids: set):
 
 
 def scrape_posts(primary_subreddit, limit, seen_ids: set):
-    queue = [primary_subreddit] + [s for s in FALLBACK_SUBREDDITS if s.lower() != primary_subreddit.lower()]
-
+    queue     = [primary_subreddit] + [s for s in FALLBACK_SUBREDDITS if s.lower() != primary_subreddit.lower()]
     collected = []
     for sub in queue:
         if len(collected) >= limit:
             break
         needed = limit - len(collected)
         print(f"Fetching from r/{sub} (need {needed} more)...")
-        batch = scrape_from_subreddit(sub, needed, seen_ids)
-        collected.extend(batch)
-
+        collected.extend(scrape_from_subreddit(sub, needed, seen_ids))
     print(f"Total collected: {len(collected)} posts")
     return collected
 
 
-# ?? Text / font helpers ???????????????????????????????????????????????????????
+# ── Text / font helpers ────────────────────────────────────────────────────────
 
 def split_sentences(text):
     return [s.strip() for s in re.split(r'(?<=[.!?])\s+', text.strip()) if s.strip()]
@@ -232,7 +267,7 @@ def wrap_words(words, font, max_px):
     return lines
 
 
-# ?? Frame rendering ???????????????????????????????????????????????????????????
+# ── Frame rendering ────────────────────────────────────────────────────────────
 
 def render_subtitle_frame(sentence, highlight_word_idx, font, font_bold):
     if not sentence:
@@ -281,7 +316,7 @@ def render_subtitle_frame(sentence, highlight_word_idx, font, font_bold):
     return img
 
 
-# ?? Video helpers ?????????????????????????????????????????????????????????????
+# ── Video helpers ──────────────────────────────────────────────────────────────
 
 def get_video_duration(path):
     r = subprocess.run(
@@ -292,9 +327,9 @@ def get_video_duration(path):
     return float(r.stdout.strip())
 
 
-def extract_random_bg_clip(bg_path, duration, output_path, fps=30):
+def extract_random_bg_clip(bg_path, duration, output_path, rng: random.Random, fps=30):
     total = get_video_duration(bg_path)
-    start = random.uniform(0, max(0, total - duration - 1))
+    start = rng.uniform(0, max(0, total - duration - 1))
     cmd = [
         "ffmpeg", "-ss", str(start), "-i", bg_path,
         "-t", str(duration),
@@ -353,7 +388,7 @@ def build_timeline(text, audio_duration, fps=30):
     return timeline, total_frames
 
 
-def make_video(text, audio_path, audio_duration, bg_path, output_path, fps=30):
+def make_video(text, audio_path, audio_duration, bg_path, output_path, rng: random.Random, fps=30):
     font      = get_font(FONT_SIZE, bold=False)
     font_bold = get_font(FONT_SIZE, bold=True)
 
@@ -361,7 +396,7 @@ def make_video(text, audio_path, audio_duration, bg_path, output_path, fps=30):
 
     with tempfile.TemporaryDirectory() as frames_dir:
         bg_clip = os.path.join(frames_dir, "bg.mp4")
-        extract_random_bg_clip(bg_path, audio_duration + 0.5, bg_clip, fps)
+        extract_random_bg_clip(bg_path, audio_duration + 0.5, bg_clip, rng, fps)
 
         print(f"  Rendering {total_frames} frames...")
         prev_state, prev_img = None, None
@@ -379,24 +414,21 @@ def make_video(text, audio_path, audio_duration, bg_path, output_path, fps=30):
     print(f"Done: {output_path} ({size_mb:.1f} MB)")
 
 
-def generate_tts(pipeline, text, output_path):
-    generator = pipeline(text, voice=VOICE, speed=1.0, split_pattern=r"\n+")
+def generate_tts(pipeline, text, voice, output_path):
+    generator = pipeline(text, voice=voice, speed=1.0, split_pattern=r"\n+")
     chunks    = [audio for _, _, audio in generator]
     combined  = np.concatenate(chunks)
     sf.write(output_path, combined, 24000)
     duration = len(combined) / 24000
-    print(f"TTS: {output_path} ({duration:.1f}s)")
+    print(f"TTS [{voice}]: {output_path} ({duration:.1f}s)")
     return duration
 
 
-def pick_background(index):
-    backgrounds = sorted(glob.glob("backgrounds/*.mp4"))
-    if not backgrounds:
-        raise FileNotFoundError("No background videos found in backgrounds/")
-    return backgrounds[index % len(backgrounds)]
+def pick_background(backgrounds, rng: random.Random):
+    return rng.choice(backgrounds)
 
 
-# ?? Entry point ???????????????????????????????????????????????????????????????
+# ── Entry point ────────────────────────────────────────────────────────────────
 
 def main():
     subreddit = os.environ.get("SUBREDDIT", "AmItheAsshole")
@@ -406,22 +438,29 @@ def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     os.makedirs("audio", exist_ok=True)
 
-    tracking = load_tracking()
-    seen_ids = set(tracking["seen_posts"].keys())
-    print(f"Loaded {len(seen_ids)} previously-seen post IDs from {TRACKING_FILE}")
+    tracking    = load_tracking()
+    seen_ids    = set(tracking["seen_posts"].keys())
+    backgrounds = sorted(glob.glob("backgrounds/*.mp4"))
+    if not backgrounds:
+        raise FileNotFoundError("No background videos found in backgrounds/")
 
+    print(f"Loaded {len(seen_ids)} previously-seen post IDs")
     posts    = scrape_posts(subreddit, limit, seen_ids)
     pipeline = KPipeline(lang_code="a")
-
     metadata = []
 
     for i, post in enumerate(posts):
+        rng     = seeded_rng(post["id"], i)
+        voice   = pick_voice(rng)
+        privacy = get_privacy(i)
+
         print(f"\n--- Post {i+1}/{len(posts)}: {post['title']} (id={post['id']})")
+        print(f"  Voice: {voice}  |  Privacy: {privacy}")
+
         body = post["body"] or ""
         text = expand_aita(censor(post["title"]))
         if body:
             text += ". " + expand_aita(censor(body))
-
         print(f"  Script length: {len(text)} chars")
 
         audio_path  = f"audio/post_{i+1}.wav"
@@ -429,8 +468,8 @@ def main():
         success     = False
 
         try:
-            duration = generate_tts(pipeline, text, audio_path)
-            make_video(text, audio_path, duration, pick_background(i), output_path)
+            duration = generate_tts(pipeline, text, voice, audio_path)
+            make_video(text, audio_path, duration, pick_background(backgrounds, rng), output_path, rng)
             success = True
         except Exception as e:
             print(f"  Failed: {e}")
@@ -442,6 +481,8 @@ def main():
             "file":      output_path,
             "yt_title":  format_yt_title(post["title"]),
             "post_id":   post["id"],
+            "voice":     voice,
+            "privacy":   privacy,
             "success":   success,
         })
 
