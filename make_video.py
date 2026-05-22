@@ -27,6 +27,7 @@ FONT_SIZE     = 52
 MAX_WIDTH     = 900
 VIDEO_W       = 1080
 VIDEO_H       = 1920
+MAX_BODY_CHARS = 2000
 
 SUBREDDIT_NAMES = {
     "amitheasshole":       "Am I the Asshole",
@@ -78,7 +79,7 @@ def save_tracking(tracking: dict):
     os.makedirs("data", exist_ok=True)
     with open(TRACKING_FILE, "w", encoding="utf-8") as f:
         json.dump(tracking, f, indent=2, ensure_ascii=False)
-    print(f"Tracking saved ? {TRACKING_FILE} ({len(tracking['seen_posts'])} total posts)")
+    print(f"Tracking saved → {TRACKING_FILE} ({len(tracking['seen_posts'])} total posts)")
 
 
 def mark_seen(tracking: dict, post: dict, subreddit: str, success: bool):
@@ -103,14 +104,29 @@ def full_subreddit_name(sub):
 
 
 def expand_aita(title: str) -> str:
-    """Replace AITA abbreviation with the full phrase for YouTube titles."""
     return re.sub(r'\bAITA\b', 'Am I The A-hole', title, flags=re.IGNORECASE)
 
 
 def format_yt_title(raw_title: str) -> str:
-    """Expand AITA and enforce YouTube's 100-char title limit."""
     title = expand_aita(raw_title)
     return title[:100]
+
+
+def get_full_post_body(post_id: str) -> str:
+    """Fetch the complete selftext for a single post via its permalink endpoint."""
+    url = f"https://www.reddit.com/comments/{post_id}.json"
+    try:
+        r = requests.get(url, headers=HEADERS, proxies=PROXIES, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        selftext = data[0]["data"]["children"][0]["data"].get("selftext", "")
+        # Strip Reddit's placeholder strings
+        if selftext in ("[removed]", "[deleted]", ""):
+            return ""
+        return selftext[:MAX_BODY_CHARS]
+    except Exception as e:
+        print(f"  Warning: could not fetch full body for {post_id}: {e}")
+        return ""
 
 
 def scrape_posts(subreddit, limit, seen_ids: set):
@@ -126,10 +142,14 @@ def scrape_posts(subreddit, limit, seen_ids: set):
         if post_id in seen_ids:
             skipped += 1
             continue
+
+        print(f"  Fetching full body for post {post_id}...")
+        full_body = get_full_post_body(post_id)
+
         posts.append({
             "id":    post_id,
             "title": d["title"],
-            "body":  d.get("selftext", "")[:800],
+            "body":  full_body,
         })
         if len(posts) == limit:
             break
@@ -347,7 +367,7 @@ def pick_background(index):
 def main():
     subreddit = os.environ.get("SUBREDDIT", "AmItheAsshole")
     limit     = int(os.environ.get("LIMIT", "5"))
-    print(f"Subreddit: r/{subreddit} ? \"{full_subreddit_name(subreddit)}\"")
+    print(f"Subreddit: r/{subreddit} → \"{full_subreddit_name(subreddit)}\"")
 
     os.makedirs(OUT_DIR, exist_ok=True)
     os.makedirs("audio", exist_ok=True)
@@ -359,7 +379,6 @@ def main():
     posts    = scrape_posts(subreddit, limit, seen_ids)
     pipeline = KPipeline(lang_code="a")
 
-    # Metadata file so the upload step knows each video's YouTube title
     metadata = []
 
     for i, post in enumerate(posts):
@@ -368,6 +387,8 @@ def main():
         text = expand_aita(censor(post["title"]))
         if body:
             text += ". " + expand_aita(censor(body))
+
+        print(f"  Script length: {len(text)} chars")
 
         audio_path  = f"audio/post_{i+1}.wav"
         output_path = f"{OUT_DIR}/video_{i+1}.mp4"
@@ -390,12 +411,11 @@ def main():
             "success":   success,
         })
 
-    # Write metadata for the upload step
     metadata_path = f"{OUT_DIR}/metadata.json"
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2, ensure_ascii=False)
-    print(f"\nMetadata written ? {metadata_path}")
-    print(f"All done ? {OUT_DIR}/")
+    print(f"\nMetadata written → {metadata_path}")
+    print(f"All done → {OUT_DIR}/")
 
 
 if __name__ == "__main__":
