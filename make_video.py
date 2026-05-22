@@ -27,7 +27,7 @@ FONT_SIZE     = 52
 MAX_WIDTH     = 900
 VIDEO_W       = 1080
 VIDEO_H       = 1920
-MAX_BODY_CHARS = 2000
+MAX_BODY_CHARS = 4000
 
 SUBREDDIT_NAMES = {
     "amitheasshole":       "Am I the Asshole",
@@ -157,10 +157,16 @@ def scrape_from_subreddit(subreddit, limit, seen_ids: set):
         if post_id in seen_ids:
             skipped += 1
             continue
+        raw_body = d.get("selftext", "")
+        if len(raw_body) > MAX_BODY_CHARS:
+            # Trim to last complete sentence so we never cut mid-sentence
+            trimmed = raw_body[:MAX_BODY_CHARS]
+            last_end = max(trimmed.rfind(". "), trimmed.rfind("? "), trimmed.rfind("! "))
+            raw_body = trimmed[:last_end + 1] if last_end != -1 else trimmed
         posts.append({
             "id":        post_id,
             "title":     d["title"],
-            "body":      d.get("selftext", "")[:MAX_BODY_CHARS],
+            "body":      raw_body,
             "subreddit": subreddit,
         })
         if len(posts) == limit:
