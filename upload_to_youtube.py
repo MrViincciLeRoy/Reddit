@@ -55,7 +55,6 @@ def upload_video(youtube, file_path: str, title: str, privacy: str = "public"):
         "snippet": {
             "title":       shorts_title,
             "description": "#Shorts #Reddit #RedditStories #Story #Storytime #aita  #satisfying #funny #comedy #askreddit #stories #redditstorytime #reddit stories  #short  #Redditreport #aitareddit  #askredditstories  #asmr  #r/aita  #viral",
-,
             "tags":        ["AITA", "Reddit", "Shorts", "AmITheAsshole", "confession", "karma", "kdrama", "aita", "reddit stories", "stories"],
             "categoryId":  "24",   # People & Blogs
         },
