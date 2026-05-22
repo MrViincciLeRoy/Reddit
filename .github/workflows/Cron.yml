@@ -1,0 +1,47 @@
+name: Publish Unlisted Videos
+
+# Runs at "random-feeling" times spread across the week.
+# A random sleep (0–90 min) at job start makes the actual fire time unpredictable.
+on:
+  schedule:
+    - cron: '17 3  * * 2'   # Tuesday  03:17 UTC
+    - cron: '43 11 * * 4'   # Thursday 11:43 UTC
+    - cron: '7  19 * * 6'   # Saturday 19:07 UTC
+    - cron: '31 7  * * 0'   # Sunday   07:31 UTC
+
+  workflow_dispatch: {}     # keep manual trigger for testing
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Random delay (0–90 min)
+        run: |
+          SLEEP=$(( RANDOM % 5400 ))
+          echo "Sleeping ${SLEEP}s before publishing..."
+          sleep "$SLEEP"
+
+      - name: Install Python deps
+        run: |
+          pip install \
+            google-api-python-client \
+            google-auth \
+            google-auth-oauthlib \
+            google-auth-httplib2
+
+      - name: Write OAuth token
+        env:
+          YOUTUBE_TOKEN: ${{ secrets.YOUTUBE_TOKEN }}
+        run: echo "$YOUTUBE_TOKEN" | base64 --decode > token.pkl
+
+      - name: Publish unlisted/private videos
+        run: python3 publish_unlisted.py
+
+      - name: Remove token
+        if: always()
+        run: rm -f token.pkl
