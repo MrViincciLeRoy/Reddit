@@ -112,22 +112,6 @@ def format_yt_title(raw_title: str) -> str:
     return title[:100]
 
 
-def get_full_post_body(post_id: str) -> str:
-    """Fetch the complete selftext for a single post via its permalink endpoint."""
-    url = f"https://www.reddit.com/comments/{post_id}.json"
-    try:
-        r = reddit_get(url)
-        data = r.json()
-        selftext = data[0]["data"]["children"][0]["data"].get("selftext", "")
-        # Strip Reddit's placeholder strings
-        if selftext in ("[removed]", "[deleted]", ""):
-            return ""
-        return selftext[:MAX_BODY_CHARS]
-    except Exception as e:
-        print(f"  Warning: could not fetch full body for {post_id}: {e}")
-        return ""
-
-
 def reddit_get(url, retries=5):
     """GET with exponential backoff on 429."""
     import time
@@ -144,10 +128,27 @@ def reddit_get(url, retries=5):
     raise RuntimeError(f"Failed after {retries} retries: {url}")
 
 
-def scrape_posts(subreddit, limit, seen_ids: set):
+FALLBACK_SUBREDDITS = [
+    "AmItheAsshole",
+    "tifu",
+    "relationship_advice",
+    "maliciouscompliance",
+    "pettyrevenge",
+    "prorevenge",
+    "entitledparents",
+    "offmychest",
+    "confessions",
+]
+
+
+def scrape_from_subreddit(subreddit, limit, seen_ids: set):
     fetch_n = min(limit * 3, 100)
     url = f"https://www.reddit.com/r/{subreddit}/top.json?limit={fetch_n}&t=day"
-    r = reddit_get(url)
+    try:
+        r = reddit_get(url)
+    except Exception as e:
+        print(f"  Could not fetch r/{subreddit}: {e}")
+        return []
 
     posts, skipped = [], 0
     for item in r.json()["data"]["children"]:
@@ -156,20 +157,33 @@ def scrape_posts(subreddit, limit, seen_ids: set):
         if post_id in seen_ids:
             skipped += 1
             continue
-
-        print(f"  Fetching full body for post {post_id}...")
-        full_body = get_full_post_body(post_id)
-
         posts.append({
-            "id":    post_id,
-            "title": d["title"],
-            "body":  full_body,
+            "id":        post_id,
+            "title":     d["title"],
+            "body":      d.get("selftext", "")[:MAX_BODY_CHARS],
+            "subreddit": subreddit,
         })
         if len(posts) == limit:
             break
 
-    print(f"Fetched {len(posts)} new posts from r/{subreddit} (skipped {skipped} already-seen)")
+    print(f"  r/{subreddit}: {len(posts)} new, {skipped} skipped")
     return posts
+
+
+def scrape_posts(primary_subreddit, limit, seen_ids: set):
+    queue = [primary_subreddit] + [s for s in FALLBACK_SUBREDDITS if s.lower() != primary_subreddit.lower()]
+
+    collected = []
+    for sub in queue:
+        if len(collected) >= limit:
+            break
+        needed = limit - len(collected)
+        print(f"Fetching from r/{sub} (need {needed} more)...")
+        batch = scrape_from_subreddit(sub, needed, seen_ids)
+        collected.extend(batch)
+
+    print(f"Total collected: {len(collected)} posts")
+    return collected
 
 
 # ?? Text / font helpers ???????????????????????????????????????????????????????
@@ -415,7 +429,7 @@ def main():
         except Exception as e:
             print(f"  Failed: {e}")
         finally:
-            mark_seen(tracking, post, subreddit, success)
+            mark_seen(tracking, post, post.get("subreddit", subreddit), success)
             save_tracking(tracking)
 
         metadata.append({
