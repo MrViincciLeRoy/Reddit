@@ -116,8 +116,7 @@ def get_full_post_body(post_id: str) -> str:
     """Fetch the complete selftext for a single post via its permalink endpoint."""
     url = f"https://www.reddit.com/comments/{post_id}.json"
     try:
-        r = requests.get(url, headers=HEADERS, proxies=PROXIES, timeout=30)
-        r.raise_for_status()
+        r = reddit_get(url)
         data = r.json()
         selftext = data[0]["data"]["children"][0]["data"].get("selftext", "")
         # Strip Reddit's placeholder strings
@@ -129,11 +128,26 @@ def get_full_post_body(post_id: str) -> str:
         return ""
 
 
+def reddit_get(url, retries=5):
+    """GET with exponential backoff on 429."""
+    import time
+    delay = 10
+    for attempt in range(retries):
+        r = requests.get(url, headers=HEADERS, proxies=PROXIES, timeout=30)
+        if r.status_code == 429:
+            wait = delay * (2 ** attempt)
+            print(f"  429 rate limit — waiting {wait}s (attempt {attempt+1}/{retries})")
+            time.sleep(wait)
+            continue
+        r.raise_for_status()
+        return r
+    raise RuntimeError(f"Failed after {retries} retries: {url}")
+
+
 def scrape_posts(subreddit, limit, seen_ids: set):
     fetch_n = min(limit * 3, 100)
     url = f"https://www.reddit.com/r/{subreddit}/top.json?limit={fetch_n}&t=day"
-    r = requests.get(url, headers=HEADERS, proxies=PROXIES, timeout=30)
-    r.raise_for_status()
+    r = reddit_get(url)
 
     posts, skipped = [], 0
     for item in r.json()["data"]["children"]:
