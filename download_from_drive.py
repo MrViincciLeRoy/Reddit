@@ -5,9 +5,11 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
+# IDs were swapped in secrets — GDRIVE_SUBWAY_ID actually holds the Minecraft
+# footage and GDRIVE_MINECRAFT_ID holds GTA. References corrected here.
 BACKGROUNDS = {
-    "backgrounds/minecraft.mp4":      os.environ.get("GDRIVE_MINECRAFT_ID", ""),
-    "backgrounds/subway_surfers.mp4": os.environ.get("GDRIVE_SUBWAY_ID", ""),
+    "backgrounds/minecraft.mp4":      os.environ.get("GDRIVE_SUBWAY_ID", ""),
+    "backgrounds/subway_surfers.mp4": os.environ.get("GDRIVE_MINECRAFT_ID", ""),
 }
 
 
